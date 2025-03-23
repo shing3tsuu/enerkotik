@@ -133,14 +133,7 @@ class DatabaseMiddleware(BaseMiddleware):
                              event: Message, data: Dict[str | Any, Any]) -> Any:
         async with self.session_pool() as session:
             data['session'] = session
-            try:
-                return await handler(event, data)
-            except Exception as e:
-                await session.rollback()
-                logger.error(f'Database error: {e}')
-                raise
-            finally:
-                await session.close()
+            return await handler(event, data)
 
 class States(StatesGroup):
     name = State()
