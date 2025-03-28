@@ -1,33 +1,42 @@
-from sqlalchemy import ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from typing import Optional
+from typing import Optional, List
 from datetime import date
-from sqlalchemy import Date
+from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint, Float, BigInteger, Date, func
 
-class Base(DeclarativeBase): pass
+# DB = Postgresql(14)
 
-class UserProduct(Base):
-    __tablename__ = 'userproduct'
-    product_name: Mapped[int] = mapped_column(ForeignKey('products.name'), primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
-    extra_data: Mapped[Optional[int]]
-    products: Mapped['Products'] = relationship(back_populates="users")
-    users: Mapped['Users'] = relationship(back_populates="products")
+class Base(DeclarativeBase):
+    pass
 
 
-class Products(Base):
+class User(Base):
+    __tablename__ = 'users'
+    __table_args__ = (
+        UniqueConstraint('tg_id', 'shop_id', name='unique_user_shop'),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True,)
+    tg_id: Mapped[int] = mapped_column(BigInteger)
+    name: Mapped[Optional[str]] = mapped_column(String(30))
+    shop_id: Mapped[int] = mapped_column(ForeignKey('shops.id'))
+
+
+class Shop(Base):
+    __tablename__ = 'shops'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(unique=True)
+
+    products: Mapped[List['Product']] = relationship(back_populates='shop', cascade='all, delete-orphan')
+
+
+class Product(Base):
     __tablename__ = 'products'
+
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str]
     cost: Mapped[int]
-    shop: Mapped[str]
-    update_date: Mapped[date] = mapped_column(Date)
-    users: Mapped[list['UserProduct']] = relationship(back_populates="products")
+    update_date: Mapped[date] = mapped_column(Date, server_default=func.now())
+    shop_id: Mapped[int] = mapped_column(ForeignKey('shops.id', ondelete='CASCADE'), index=True)
 
-
-class Users(Base):
-    __tablename__ = 'users'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    tg_id: Mapped[int]
-    name: Mapped[Optional[str]]
-    products: Mapped[list['UserProduct']] = relationship( back_populates="users")
+    shop: Mapped['Shop'] = relationship(back_populates='products')
