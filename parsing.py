@@ -1,66 +1,120 @@
+from contextlib import asynccontextmanager
+from pkgutil import get_data
+from typing import AsyncGenerator, Optional, Dict, Any
 import bs4
-import pendulum
-from datetime import datetime
-from datetime import date
-from sqlalchemy import select, func
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
-from playwright.async_api import async_playwright, expect
 import requests
+import logging
+from playwright.async_api import async_playwright
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+from parsing_scheme import ShopScraperSchema, ConnectionParamsSchema, ScraperConfigSchema
+from structures import User, Product, Shop
+from botconfig import load_config
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine, AsyncSession
-import sqlalchemy as db
-from structures import Products
-
-engine = create_async_engine(url='sqlite+aiosqlite:///db.enerkotik.sqlite3')
-async_session = async_sessionmaker(engine, class_=AsyncSession)
-conn = engine.connect()
-meta = db.MetaData()
-
-@dataclass
-class ScraperConfig:
-    main_class: str
-    main_link: str
-    name_class: str
-    name_link: str
-    cost_class: str
-    cost_link: str
+from datetime import date
 
 
-@dataclass
-class ConnectionParams:
-    headers: dict
-    cookies: dict
-    params: dict
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+logger = logging.getLogger(__name__)
 
+config = load_config(".env")
+engine = create_async_engine(
+    url=f"postgresql+asyncpg://{config.db.user}:{config.db.password}@{config.db.host}:{config.db.port}/{config.db.name}",
+    pool_size=5,
+    max_overflow=5,
+    echo=False
+)
+async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-class ShopScraper:
-    def __init__(
-        self,
-        name: str,
-        link: str,
-        connection_params: ConnectionParams,
-        scraper_config: ScraperConfig,
-        website_method: str,
-        debug_info: Optional[Dict[str, Any]] = None
-    ):
-        self.name = name
-        self.link = link
-        self.connection_params = connection_params
-        self.scraper_config = scraper_config
-        self.website_method = website_method
-        self.debug_info = debug_info or {}
-        self.utc_date = self._get_current_date()
+# session factory with async context manager
+@asynccontextmanager
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    async with async_session() as session:
+        try:
+            async with session.begin():
+                yield session
+        except Exception as e:
+            logger.error(f"Database error: {e}", exc_info=True)
+            raise
 
-    @staticmethod
-    def _get_current_date() -> date:
-        utc_date = date.today()
-        return utc_date
+# main class to scrape
+class ShopScraper(ShopScraperSchema):
+    def __init__(self, **data):
+        super().__init__(**data)
 
     @staticmethod
     def _clean_price(price_str: str) -> int:
-        return int(price_str.replace('Цена', '').split(".")[0].split(",")[0].strip())
+        try:
+            return int(price_str.replace('Цена', '').split(".")[0].split(",")[0].strip())
+        except (ValueError, AttributeError):
+            return 0
 
-    async def _process_element(self, element, session):
+    def _update_page_number(self, page_num: int) -> str:
+        return self.link.replace('=1', f'={page_num}')
+
+    @staticmethod
+    def _get_current_date() -> date:
+        return date.today()
+
+    async def scrape(self):
+        if self.website_method == 'dynamic':
+            return await self._dynamic_scrape()
+        elif self.website_method == 'static':
+            return await self._static_scrape()
+        else:
+            raise ValueError("Invalid website_method. Supported methods are 'dynamic' and 'static'.")
+
+    async def _update_database(self, name: str, cost: int):
+        async with get_session() as session:
+            try:
+                shop = await session.scalar(select(Shop).filter_by(name=self.shop_name))
+                if not shop:
+                    shop = Shop(name=self.shop_name)
+                    session.add(shop)
+                    await session.commit()
+
+                product = await session.scalar(
+                    select(Product).filter_by(
+                        name=name,
+                        shop_id=shop.id,
+                        update_date=self._get_current_date()
+                    )
+                )
+                if product:
+                    product.cost = cost
+                else:
+                    session.add(Product(
+                        name=name,
+                        cost=cost,
+                        shop_id=shop.id,
+                        update_date=self._get_current_date()
+                    ))
+                await session.commit()
+            except Exception as e:
+                logger.error(f"Database update failed: {e}", exc_info=True)
+                await session.rollback()
+                raise
+
+
+    async def _finalize_debug_info(self):
+        async with get_session() as session:
+            self.debug_info['element_count'] = await session.scalar(
+                select(func.count(Product.id)).filter_by(shop_id=Shop.id, update_date=self._get_current_date())
+            )
+        return self.debug_info
+
+
+    async def _get_element_count(self) -> int:
+        async with get_session() as session:
+            result = await session.execute(
+                select(func.count(Product.id)).filter(
+                    Products.shop_id == self.shop.id,
+                    Products.update_date == self._get_current_date()
+                )
+            )
+            return result.scalar()
+
+    async def _process_element(self, element: bs4.element.Tag) -> Optional[tuple]:
         try:
             name_element = element.find(
                 self.scraper_config.name_class,
@@ -69,48 +123,36 @@ class ShopScraper:
             if not name_element:
                 return None
 
-            element_name = name_element.text.strip()
             cost_element = element.find(
                 self.scraper_config.cost_class,
                 class_=self.scraper_config.cost_link
             )
-            element_cost = self._clean_price(cost_element.text) if cost_element else 0
 
-            await self._update_database(
-                session=session,
-                name=element_name,
-                cost=element_cost
+            return (
+                name_element.text.strip(),
+                self._clean_price(cost_element.text) if cost_element else 0
             )
-
-            return element_name, element_cost
-
         except Exception as e:
+            logger.error(f"Element processing error: {e}", exc_info=True)
             self.debug_info.setdefault('errors', []).append(str(e))
             return None
 
-    async def _update_database(self, session, name: str, cost: int):
-        existing = await session.scalar(
-            select(Products).filter_by(
-                name=name,
-                shop=self.name,
-                update_date=self.utc_date
-            )
+
+    async def _parse_content(self, content: str):
+        soup = bs4.BeautifulSoup(content, "html.parser")
+        elements = soup.find_all(
+            self.scraper_config.main_class,
+            class_=self.scraper_config.main_link
         )
 
-        if not existing:
-            session.add(Products(
-                name=name,
-                cost=cost,
-                shop=self.name,
-                update_date=self.utc_date
-            ))
-        else:
-            existing.cost = cost
+        for idx, element in enumerate(elements, 1):
+            if result := await self._process_element(element):
+                await self._update_database(*result)
+                self.debug_info['processed_elements'] = idx
+            else:
+                self.debug_info['element_status'] = False
+                raise ValueError("Element processing failed.")
 
-    async def scrape(self):
-        if self.website_method == 'dynamic':
-            return await self._dynamic_scrape()
-        return await self._static_scrape()
 
     async def _dynamic_scrape(self):
         async with async_playwright() as p:
@@ -125,69 +167,23 @@ class ShopScraper:
                 await self._process_pages_dynamic(page)
             finally:
                 await browser.close()
-
         return await self._finalize_debug_info()
 
-    async def _process_pages_dynamic(self, page, pages: int = 2):
-        for page_num in range(1, pages + 1):
-            current_link = self._update_page_number(page_num)
-            await page.goto(current_link)
-            await page.wait_for_timeout(3000)
-
-            content = await page.content()
-            await self._parse_content(content)
 
     async def _static_scrape(self, pages: int = 5):
         for page_num in range(1, pages + 1):
             current_link = self._update_page_number(page_num)
             try:
                 response = requests.get(
-                current_link,
-                headers=self.connection_params.headers,
-                cookies=self.connection_params.cookies,
-                params=self.connection_params.params
-            )
-            finally:
+                    current_link,
+                    headers=self.connection_params.headers,
+                    cookies=self.connection_params.cookies,
+                    params=self.connection_params.params
+                )
                 self.debug_info['status_code'] = response.status_code
-                content = response.text
-                await self._parse_content(content)
+                await self._parse_content(response.text)
+            except Exception as e:
+                logger.error(f"Request failed: {e}")
+                self.debug_info.setdefault('errors', []).append(str(e))
 
-            return await self._finalize_debug_info()
-
-    def _update_page_number(self, page_num: int) -> str:
-        return self.link.replace('=1', f'={page_num}')
-
-    async def _parse_content(self, content: str):
-        soup = bs4.BeautifulSoup(content, features="html.parser")
-        elements = soup.find_all(
-            self.scraper_config.main_class,
-            class_=self.scraper_config.main_link
-        )
-        async with async_session() as session:
-            for idx, element in enumerate(elements, 1):
-                result = await self._process_element(element, session)
-                if result:
-                    self.debug_info['element_number'] = idx
-                    await session.commit()
-                else:
-                    self.debug_info['element_status'] = False
-                    break
-
-    async def _finalize_debug_info(self):
-        count = await self._get_element_count()
-        self.debug_info['session_elements_count'] = count
-        return self.debug_info
-
-    async def _get_element_count(self) -> int:
-        utc_date = self._get_current_date()
-        async with async_session() as session:
-            return (await session.execute(select(func.count(Products.id))
-            .filter(Products.shop == self.name, Products.update_date == utc_date))).scalar()
-
-    @property
-    def debug_info(self):
-        return self._debug_info
-
-    @debug_info.setter
-    def debug_info(self, value):
-        self._debug_info = value
+        return await self._finalize_debug_info()
