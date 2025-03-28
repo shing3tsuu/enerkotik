@@ -1,20 +1,12 @@
 from dataclasses import dataclass
 from fake_useragent import UserAgent
 from parsing import *
+from parsing_scheme import *
+
 
 ua = UserAgent().random
 
-def create_shop_config(main_class, main_link, name_class, name_link, cost_class, cost_link):
-    return ScraperConfig(
-        main_class=main_class,
-        main_link=main_link,
-        name_class=name_class,
-        name_link=name_link,
-        cost_class=cost_class,
-        cost_link=cost_link
-    )
 
-# Магнит
 cookies_magnit = {
     '_ym_uid': '1731567664913563808',
     '_ym_d': '1731567664',
@@ -60,13 +52,7 @@ params_magnit = {
     'shopType': '1',
 }
 
-magnit_connection = ConnectionParams(
-    headers=headers_magnit,
-    cookies=cookies_magnit,
-    params=params_magnit
-)
-
-magnit_config = create_shop_config(
+magnit_config = ScraperConfigSchema(
     main_class='article',
     main_link='unit-catalog-product-preview show-ratings',
     name_class='div',
@@ -75,63 +61,16 @@ magnit_config = create_shop_config(
     cost_link='pl-text unit-catalog-product-preview-prices__regular'
 )
 
+magnit_connection = ConnectionParamsSchema(
+    headers=headers_magnit,
+    cookies=cookies_magnit,
+    params=params_magnit
+)
+
 magnit = ShopScraper(
-    name='Магнит',
+    shop_name="Магнит",
     link='https://magnit.ru/catalog/4883-energeticheskie_napitki?shopCode=852714&shopType=1&page=1',
     connection_params=magnit_connection,
     scraper_config=magnit_config,
-    website_method='static'
-)
-
-cookies_pytorochka = {...}  # Ваши куки
-headers_pytorochka = {...}  # Ваши заголовки
-
-pytorochka_connection = ConnectionParams(
-    headers=headers_pytorochka,
-    cookies=cookies_pytorochka,
-    params=None
-)
-
-pytorochka_config = create_shop_config(
-    main_class='a',
-    main_link='chakra-link xlSVIYdp- css-13jvj27',
-    name_class='p',
-    name_link='chakra-text SdLEFc2B- css-1jdqp4k',
-    cost_class='p',
-    cost_link='chakra-text DUXYWqnZ- css-6uvdux'
-)
-
-pytorochka = ShopScraper(
-    name='Пятерочка',
-    link='https://5ka.ru/catalog/73C2330/73C2392/energetiki/?page=1',
-    connection_params=pytorochka_connection,
-    scraper_config=pytorochka_config,
-    website_method='dynamic'
-)
-
-# Перекресток
-cookies_perekrestok = {...}  # Ваши куки
-headers_perekrestok = {...}  # Ваши заголовки
-
-perekrestok_connection = ConnectionParams(
-    headers=headers_perekrestok,
-    cookies=cookies_perekrestok,
-    params=None
-)
-
-perekrestok_config = create_shop_config(
-    main_class='div',
-    main_link='product-card-wrapper',
-    name_class='div',
-    name_link='product-card__title',
-    cost_class='div',
-    cost_link='price-new'
-)
-
-perekrestok = ShopScraper(
-    name='Перекресток',
-    link='https://www.perekrestok.ru/cat/c/206/energeticeskie-napitki',
-    connection_params=perekrestok_connection,
-    scraper_config=perekrestok_config,
-    website_method='dynamic'
+    website_method="static"
 )
